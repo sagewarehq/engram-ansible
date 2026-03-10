@@ -60,7 +60,6 @@ draw_agent_menu() {
         WINDOW_START=0
     fi
     
-    tput clear
     tput cup 0 0
     
     echo "███████╗██╗  ██╗██╗██╗     ██╗     ███████╗"
@@ -129,6 +128,8 @@ draw_agent_menu() {
     if [ $end -lt ${#AGENTS[@]} ]; then
         echo "  ↓ $((${#AGENTS[@]} - end)) more"
     fi
+    
+    tput ed
 }
 
 toggle_agent_selection() {
@@ -228,7 +229,6 @@ CURRENT=-1
 ALL_SELECTED=0
 
 draw_menu() {
-    tput clear
     tput cup 0 0
     
     echo "███████╗██╗  ██╗██╗██╗     ██╗     ███████╗"
@@ -284,6 +284,8 @@ draw_menu() {
             fi
         fi
     done
+    
+    tput ed
 }
 
 toggle_selection() {

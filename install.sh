@@ -1,13 +1,8 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 SKILLS_URL="https://raw.githubusercontent.com/sagewarehq/engram-ansible/master/skills.txt"
-
-if ! command -v npx &> /dev/null; then
-    echo "❌ Error: npx is not installed. Please install Node.js first."
-    exit 1
-fi
 
 AGENTS=(
     "antigravity" "augment" "claude-code" "openclaw" "codebuddy" "command-code"
@@ -18,384 +13,427 @@ AGENTS=(
     "cline" "codex"
 )
 
-declare -a AGENT_SELECTED
-for i in "${!AGENTS[@]}"; do
-    AGENT_SELECTED[$i]=0
-done
+BANNER=(
+    "███████╗██╗  ██╗██╗██╗     ██╗     ███████╗"
+    "██╔════╝██║ ██╔╝██║██║     ██║     ██╔════╝"
+    "███████╗█████╔╝ ██║██║     ██║     ███████╗"
+    "╚════██║██╔═██╗ ██║██║     ██║     ╚════██║"
+    "███████║██║  ██╗██║███████╗███████╗███████║"
+    "╚══════╝╚═╝  ╚═╝╚═╝╚══════╝╚══════╝╚══════╝"
+)
 
-AGENT_CURRENT=-1
-AGENT_ALL_SELECTED=0
-WINDOW_SIZE=15
-WINDOW_START=0
+cleanup() {
+    stty echo icanon 2>/dev/null || true
+    tput cnorm 2>/dev/null || true
+}
+
+die() {
+    cleanup
+    printf "\n%s\n" "$1"
+    exit "${2:-1}"
+}
+
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        die "Error: $1 is not installed."
+    fi
+}
+
+repeat_char() {
+    local char="$1"
+    local count="$2"
+    local out=""
+    local i
+    for ((i = 0; i < count; i++)); do
+        out+="$char"
+    done
+    printf "%s" "$out"
+}
+
+render_banner() {
+    local line
+    for line in "${BANNER[@]}"; do
+        printf "%s\n" "$line"
+    done
+}
+
+fetch_skills() {
+    local raw
+    printf "Fetching skills list...\n"
+    raw="$(curl -fsSL "$SKILLS_URL")"
+
+    SKILLS=()
+    while IFS= read -r line; do
+        if [[ -n "$line" ]] && [[ ! "$line" =~ ^[[:space:]]*# ]]; then
+            SKILLS+=("$line")
+        fi
+    done <<< "$raw"
+
+    if [ ${#SKILLS[@]} -eq 0 ]; then
+        die "No skills found in remote list."
+    fi
+}
+
+init_selection() {
+    local -n items_ref=$1
+    local -n selected_ref=$2
+    local i
+
+    selected_ref=()
+    for i in "${!items_ref[@]}"; do
+        selected_ref[$i]=0
+    done
+}
+
+count_selected() {
+    local -n selected_ref=$1
+    local count=0
+    local i
+
+    for i in "${!selected_ref[@]}"; do
+        if [ "${selected_ref[$i]}" -eq 1 ]; then
+            count=$((count + 1))
+        fi
+    done
+
+    printf "%s" "$count"
+}
+
+sync_all_flag() {
+    local -n items_ref=$1
+    local -n selected_ref=$2
+    local -n all_ref=$3
+    local selected_count
+
+    selected_count="$(count_selected selected_ref)"
+    if [ "$selected_count" -eq "${#items_ref[@]}" ] && [ "${#items_ref[@]}" -gt 0 ]; then
+        all_ref=1
+    else
+        all_ref=0
+    fi
+}
+
+move_cursor() {
+    local direction="$1"
+    local max_index="$2"
+    local -n current_ref=$3
+
+    if [ "$direction" = "up" ]; then
+        if [ "$current_ref" -gt -1 ]; then
+            current_ref=$((current_ref - 1))
+        fi
+    else
+        if [ "$current_ref" -lt "$max_index" ]; then
+            current_ref=$((current_ref + 1))
+        fi
+    fi
+}
+
+toggle_item() {
+    local -n selected_ref=$1
+    local index="$2"
+
+    if [ "${selected_ref[$index]}" -eq 1 ]; then
+        selected_ref[$index]=0
+    else
+        selected_ref[$index]=1
+    fi
+}
+
+toggle_all() {
+    local -n selected_ref=$1
+    local -n all_ref=$2
+    local i
+    local next_value=1
+
+    if [ "$all_ref" -eq 1 ]; then
+        next_value=0
+    fi
+
+    for i in "${!selected_ref[@]}"; do
+        selected_ref[$i]=$next_value
+    done
+
+    all_ref=$next_value
+}
+
+build_chosen_items() {
+    local -n items_ref=$1
+    local -n selected_ref=$2
+    local -n chosen_ref=$3
+    local i
+
+    chosen_ref=()
+    for i in "${!items_ref[@]}"; do
+        if [ "${selected_ref[$i]}" -eq 1 ]; then
+            chosen_ref+=("${items_ref[$i]}")
+        fi
+    done
+}
 
 get_key() {
+    local key rest
+
+    IFS= read -rsn1 key || true
+    if [[ -z "$key" ]]; then
+        echo ""
+        return
+    fi
+
+    case "$key" in
+        $'\x1b')
+            IFS= read -rsn2 -t 0.01 rest || true
+            case "$rest" in
+                '[A') echo "UP" ;;
+                '[B') echo "DOWN" ;;
+                *) echo "ESC" ;;
+            esac
+            ;;
+        "")
+            echo "ENTER"
+            ;;
+        $'\n'|$'\r')
+            echo "ENTER"
+            ;;
+        " ")
+            echo "SPACE"
+            ;;
+        q|Q)
+            echo "QUIT"
+            ;;
+        j|J)
+            echo "DOWN"
+            ;;
+        k|K)
+            echo "UP"
+            ;;
+        a|A)
+            echo "TOGGLE_ALL"
+            ;;
+        *)
+            echo "UNKNOWN"
+            ;;
+    esac
+}
+
+draw_picker() {
+    local title="$1"
+    local subtitle="$2"
+    local all_label="$3"
+    local -n items_ref=$4
+    local -n selected_ref=$5
+    local current="$6"
+    local all_selected="$7"
+    local window_start="$8"
+    local window_size="$9"
+
+    local selected_count total end i marker radio label width
+    selected_count="$(count_selected selected_ref)"
+    total=${#items_ref[@]}
+    end=$((window_start + window_size))
+    if [ "$end" -gt "$total" ]; then
+        end=$total
+    fi
+
+    width=70
+
+    tput cup 0 0
+    render_banner
+    printf "\n"
+    printf ".%s.\n" "$(repeat_char "-" "$width")"
+    printf "| %-68s |\n" "$title"
+    printf "| %-68s |\n" "$subtitle"
+    printf "| %-68s |\n" "Selected: $selected_count/$total  |  arrows or j/k to move  |  space to toggle"
+    printf "| %-68s |\n" "a toggles all  |  enter confirms  |  q quits"
+    printf "'%s'\n\n" "$(repeat_char "-" "$width")"
+
+    if [ "$current" -eq -1 ]; then
+        marker=">"
+    else
+        marker=" "
+    fi
+    if [ "$all_selected" -eq 1 ]; then
+        radio="[x]"
+    else
+        radio="[ ]"
+    fi
+    printf "%s %s %s\n\n" "$marker" "$radio" "$all_label"
+
+    if [ "$window_start" -gt 0 ]; then
+        printf "  ... %s above ...\n" "$window_start"
+    fi
+
+    for ((i = window_start; i < end; i++)); do
+        if [ "$i" -eq "$current" ]; then
+            marker=">"
+        else
+            marker=" "
+        fi
+
+        if [ "${selected_ref[$i]}" -eq 1 ]; then
+            radio="[x]"
+        else
+            radio="[ ]"
+        fi
+
+        label="${items_ref[$i]}"
+        printf "%s %s %s\n" "$marker" "$radio" "$label"
+    done
+
+    if [ "$end" -lt "$total" ]; then
+        printf "  ... %s more ...\n" "$((total - end))"
+    fi
+
+    tput ed
+}
+
+run_picker() {
+    local title="$1"
+    local subtitle="$2"
+    local all_label="$3"
+    local -n items_ref=$4
+    local -n selected_ref=$5
+    local window_size="$6"
+
+    local current=-1
+    local all_selected=0
+    local window_start=0
+    local max_index=$(( ${#items_ref[@]} - 1 ))
     local key
-    IFS= read -rsn1 key
-    
-    if [[ $key == $'\x1b' ]]; then
-        read -rsn1 k1
-        read -rsn1 k2
-        case "$k1$k2" in
-            '[A') echo "UP" ;;
-            '[B') echo "DOWN" ;;
-            *) echo "ESC" ;;
+
+    while true; do
+        if [ "$current" -ge 0 ]; then
+            if [ "$current" -lt "$window_start" ]; then
+                window_start=$current
+            elif [ "$current" -ge $((window_start + window_size)) ]; then
+                window_start=$((current - window_size + 1))
+            fi
+        else
+            window_start=0
+        fi
+
+        draw_picker "$title" "$subtitle" "$all_label" items_ref selected_ref "$current" "$all_selected" "$window_start" "$window_size"
+        key="$(get_key)"
+
+        case "$key" in
+            UP)
+                move_cursor up "$max_index" current
+                ;;
+            DOWN)
+                move_cursor down "$max_index" current
+                ;;
+            SPACE)
+                if [ "$current" -eq -1 ]; then
+                    toggle_all selected_ref all_selected
+                else
+                    toggle_item selected_ref "$current"
+                    sync_all_flag items_ref selected_ref all_selected
+                fi
+                ;;
+            TOGGLE_ALL)
+                toggle_all selected_ref all_selected
+                ;;
+            ENTER)
+                break
+                ;;
+            QUIT|ESC)
+                die "Installation cancelled." 0
+                ;;
         esac
-    elif [[ $key == "" ]] || [[ $key == $'\n' ]]; then
-        echo "ENTER"
-    elif [[ $key == " " ]]; then
-        echo "SPACE"
-    elif [[ $key == "q" ]] || [[ $key == "Q" ]]; then
-        echo "QUIT"
-    fi
+    done
 }
 
-draw_agent_menu() {
-    if [ $AGENT_CURRENT -ge 0 ]; then
-        if [ $AGENT_CURRENT -lt $WINDOW_START ]; then
-            WINDOW_START=$AGENT_CURRENT
-        elif [ $AGENT_CURRENT -ge $((WINDOW_START + WINDOW_SIZE)) ]; then
-            WINDOW_START=$((AGENT_CURRENT - WINDOW_SIZE + 1))
+install_skills() {
+    local -n skills_ref=$1
+    local -n agents_ref=$2
+    local installed=0
+    local failed=0
+    local skill owner repo skill_name cmd agent
+    local -a cmd_parts
+
+    printf "Installing %s skill(s) to %s agent(s)...\n\n" "${#skills_ref[@]}" "${#agents_ref[@]}"
+
+    for skill in "${skills_ref[@]}"; do
+        printf "-> %s\n" "$skill"
+        cmd_parts=(npx skills add)
+
+        if [[ "$skill" =~ ^([^/]+)/([^/]+)/(.+)$ ]]; then
+            owner="${BASH_REMATCH[1]}"
+            repo="${BASH_REMATCH[2]}"
+            skill_name="${BASH_REMATCH[3]}"
+            cmd_parts+=("${owner}/${repo}" --skill "$skill_name")
+        else
+            cmd_parts+=("$skill")
         fi
-    else
-        WINDOW_START=0
-    fi
-    
-    tput cup 0 0
-    
-    echo "███████╗██╗  ██╗██╗██╗     ██╗     ███████╗"
-    echo "██╔════╝██║ ██╔╝██║██║     ██║     ██╔════╝"
-    echo "███████╗█████╔╝ ██║██║     ██║     ███████╗"
-    echo "╚════██║██╔═██╗ ██║██║     ██║     ╚════██║"
-    echo "███████║██║  ██╗██║███████╗███████╗███████║"
-    echo "╚══════╝╚═╝  ╚═╝╚═╝╚══════╝╚══════╝╚══════╝"
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────────┐"
-    echo "│ Select Agents                                                       │"
-    echo "├─────────────────────────────────────────────────────────────────────┤"
-    
-    local selected_count=0
-    for i in "${!AGENTS[@]}"; do
-        if [ ${AGENT_SELECTED[$i]} -eq 1 ]; then
-            selected_count=$((selected_count + 1))
+
+        for agent in "${agents_ref[@]}"; do
+            cmd_parts+=(-a "$agent")
+        done
+        cmd_parts+=(-y)
+
+        if "${cmd_parts[@]}"; then
+            printf "   ok\n\n"
+            installed=$((installed + 1))
+        else
+            printf "   failed\n\n"
+            failed=$((failed + 1))
         fi
     done
-    
-    printf "│ %-67s │\n" "  Selected: $selected_count/${#AGENTS[@]} agents"
-    printf "│ %-67s │\n" "  Use ↑/↓ arrows, SPACE to select, ENTER to continue"
-    echo "└─────────────────────────────────────────────────────────────────────┘"
-    echo ""
-    
-    if [ $AGENT_CURRENT -eq -1 ]; then
-        if [ $AGENT_ALL_SELECTED -eq 1 ]; then
-            echo "❯ ◉ All agents"
-        else
-            echo "❯ ○ All agents"
-        fi
-    else
-        if [ $AGENT_ALL_SELECTED -eq 1 ]; then
-            echo "  ◉ All agents"
-        else
-            echo "  ○ All agents"
-        fi
+
+    printf "Done. Installed: %s" "$installed"
+    if [ "$failed" -gt 0 ]; then
+        printf "  Failed: %s" "$failed"
     fi
-    echo ""
-    
-    local end=$((WINDOW_START + WINDOW_SIZE))
-    if [ $end -gt ${#AGENTS[@]} ]; then
-        end=${#AGENTS[@]}
-    fi
-    
-    if [ $WINDOW_START -gt 0 ]; then
-        echo "  ↑ $WINDOW_START more"
-    fi
-    
-    for i in $(seq $WINDOW_START $((end - 1))); do
-        if [ $i -eq $AGENT_CURRENT ]; then
-            if [ ${AGENT_SELECTED[$i]} -eq 1 ]; then
-                echo "❯ ◉ ${AGENTS[$i]}"
-            else
-                echo "❯ ○ ${AGENTS[$i]}"
-            fi
-        else
-            if [ ${AGENT_SELECTED[$i]} -eq 1 ]; then
-                echo "  ◉ ${AGENTS[$i]}"
-            else
-                echo "  ○ ${AGENTS[$i]}"
-            fi
-        fi
-    done
-    
-    if [ $end -lt ${#AGENTS[@]} ]; then
-        echo "  ↓ $((${#AGENTS[@]} - end)) more"
-    fi
-    
-    tput ed
+    printf "\n"
 }
 
-toggle_agent_selection() {
-    if [ $AGENT_CURRENT -eq -1 ]; then
-        if [ $AGENT_ALL_SELECTED -eq 1 ]; then
-            AGENT_ALL_SELECTED=0
-            for i in "${!AGENTS[@]}"; do
-                AGENT_SELECTED[$i]=0
-            done
-        else
-            AGENT_ALL_SELECTED=1
-            for i in "${!AGENTS[@]}"; do
-                AGENT_SELECTED[$i]=1
-            done
-        fi
-    else
-        if [ ${AGENT_SELECTED[$AGENT_CURRENT]} -eq 1 ]; then
-            AGENT_SELECTED[$AGENT_CURRENT]=0
-            AGENT_ALL_SELECTED=0
-        else
-            AGENT_SELECTED[$AGENT_CURRENT]=1
-        fi
+main() {
+    local -a SKILLS=()
+    local -a AGENT_SELECTED=()
+    local -a SKILL_SELECTED=()
+    local -a SELECTED_AGENTS=()
+    local -a SELECTED_SKILLS=()
+
+    require_command npx
+    require_command curl
+    require_command tput
+    require_command stty
+
+    trap cleanup EXIT INT TERM
+
+    stty -echo -icanon time 0 min 0
+    tput civis
+
+    init_selection AGENTS AGENT_SELECTED
+    run_picker \
+        "Select Agents" \
+        "Choose which agent integrations receive the skills." \
+        "All agents" \
+        AGENTS AGENT_SELECTED 14
+
+    build_chosen_items AGENTS AGENT_SELECTED SELECTED_AGENTS
+    if [ ${#SELECTED_AGENTS[@]} -eq 0 ]; then
+        die "No agents selected." 0
     fi
+
+    tput clear
+    fetch_skills
+    init_selection SKILLS SKILL_SELECTED
+    run_picker \
+        "Select Skills" \
+        "Choose which skills to install from the remote list." \
+        "All skills" \
+        SKILLS SKILL_SELECTED 12
+
+    build_chosen_items SKILLS SKILL_SELECTED SELECTED_SKILLS
+    if [ ${#SELECTED_SKILLS[@]} -eq 0 ]; then
+        die "No skills selected." 0
+    fi
+
+    cleanup
+    trap - EXIT INT TERM
+    tput clear
+    install_skills SELECTED_SKILLS SELECTED_AGENTS
 }
 
-stty -echo -icanon time 0 min 0
-draw_agent_menu
-
-while true; do
-    key=$(get_key)
-    
-    case "$key" in
-        UP)
-            if [ $AGENT_CURRENT -gt -1 ]; then
-                AGENT_CURRENT=$((AGENT_CURRENT - 1))
-            fi
-            draw_agent_menu
-            ;;
-        DOWN)
-            if [ $AGENT_CURRENT -lt $((${#AGENTS[@]} - 1)) ]; then
-                AGENT_CURRENT=$((AGENT_CURRENT + 1))
-            fi
-            draw_agent_menu
-            ;;
-        SPACE)
-            toggle_agent_selection
-            draw_agent_menu
-            ;;
-        ENTER)
-            break
-            ;;
-        QUIT)
-            stty echo icanon
-            tput clear
-            echo "❌ Installation cancelled"
-            exit 0
-            ;;
-    esac
-done
-
-stty echo icanon
-tput clear
-
-SELECTED_AGENTS=()
-for i in "${!AGENTS[@]}"; do
-    if [ ${AGENT_SELECTED[$i]} -eq 1 ]; then
-        SELECTED_AGENTS+=("${AGENTS[$i]}")
-    fi
-done
-
-if [ ${#SELECTED_AGENTS[@]} -eq 0 ]; then
-    echo "❌ No agents selected"
-    exit 0
-fi
-
-echo "📥 Fetching skills list..."
-SKILLS_CONTENT=$(curl -fsSL "$SKILLS_URL")
-
-SKILLS=()
-while IFS= read -r line; do
-    if [[ -n "$line" ]] && [[ ! "$line" =~ ^[[:space:]]*# ]]; then
-        SKILLS+=("$line")
-    fi
-done < <(echo "$SKILLS_CONTENT")
-
-if [ ${#SKILLS[@]} -eq 0 ]; then
-    echo "❌ No skills found"
-    exit 1
-fi
-
-declare -a SELECTED
-for i in "${!SKILLS[@]}"; do
-    SELECTED[$i]=0
-done
-
-CURRENT=-1
-ALL_SELECTED=0
-
-draw_menu() {
-    tput cup 0 0
-    
-    echo "███████╗██╗  ██╗██╗██╗     ██╗     ███████╗"
-    echo "██╔════╝██║ ██╔╝██║██║     ██║     ██╔════╝"
-    echo "███████╗█████╔╝ ██║██║     ██║     ███████╗"
-    echo "╚════██║██╔═██╗ ██║██║     ██║     ╚════██║"
-    echo "███████║██║  ██╗██║███████╗███████╗███████║"
-    echo "╚══════╝╚═╝  ╚═╝╚═╝╚══════╝╚══════╝╚══════╝"
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────────┐"
-    echo "│ Select Skills                                                       │"
-    echo "├─────────────────────────────────────────────────────────────────────┤"
-    
-    local selected_count=0
-    for i in "${!SKILLS[@]}"; do
-        if [ ${SELECTED[$i]} -eq 1 ]; then
-            selected_count=$((selected_count + 1))
-        fi
-    done
-    
-    printf "│ %-67s │\n" "  Selected: $selected_count/${#SKILLS[@]} skills"
-    printf "│ %-67s │\n" "  Use ↑/↓ arrows, SPACE to select, ENTER to install"
-    echo "└─────────────────────────────────────────────────────────────────────┘"
-    echo ""
-    
-    if [ $CURRENT -eq -1 ]; then
-        if [ $ALL_SELECTED -eq 1 ]; then
-            echo "❯ ◉ Install all skills"
-        else
-            echo "❯ ○ Install all skills"
-        fi
-    else
-        if [ $ALL_SELECTED -eq 1 ]; then
-            echo "  ◉ Install all skills"
-        else
-            echo "  ○ Install all skills"
-        fi
-    fi
-    echo ""
-    
-    for i in "${!SKILLS[@]}"; do
-        if [ $i -eq $CURRENT ]; then
-            if [ ${SELECTED[$i]} -eq 1 ]; then
-                echo "❯ ◉ ${SKILLS[$i]}"
-            else
-                echo "❯ ○ ${SKILLS[$i]}"
-            fi
-        else
-            if [ ${SELECTED[$i]} -eq 1 ]; then
-                echo "  ◉ ${SKILLS[$i]}"
-            else
-                echo "  ○ ${SKILLS[$i]}"
-            fi
-        fi
-    done
-    
-    tput ed
-}
-
-toggle_selection() {
-    if [ $CURRENT -eq -1 ]; then
-        if [ $ALL_SELECTED -eq 1 ]; then
-            ALL_SELECTED=0
-            for i in "${!SKILLS[@]}"; do
-                SELECTED[$i]=0
-            done
-        else
-            ALL_SELECTED=1
-            for i in "${!SKILLS[@]}"; do
-                SELECTED[$i]=1
-            done
-        fi
-    else
-        if [ ${SELECTED[$CURRENT]} -eq 1 ]; then
-            SELECTED[$CURRENT]=0
-            ALL_SELECTED=0
-        else
-            SELECTED[$CURRENT]=1
-        fi
-    fi
-}
-
-stty -echo -icanon time 0 min 0
-draw_menu
-
-while true; do
-    key=$(get_key)
-    
-    case "$key" in
-        UP)
-            if [ $CURRENT -gt -1 ]; then
-                CURRENT=$((CURRENT - 1))
-            fi
-            draw_menu
-            ;;
-        DOWN)
-            if [ $CURRENT -lt $((${#SKILLS[@]} - 1)) ]; then
-                CURRENT=$((CURRENT + 1))
-            fi
-            draw_menu
-            ;;
-        SPACE)
-            toggle_selection
-            draw_menu
-            ;;
-        ENTER)
-            break
-            ;;
-        QUIT)
-            stty echo icanon
-            tput clear
-            echo "❌ Installation cancelled"
-            exit 0
-            ;;
-    esac
-done
-
-stty echo icanon
-tput clear
-
-SELECTED_SKILLS=()
-for i in "${!SKILLS[@]}"; do
-    if [ ${SELECTED[$i]} -eq 1 ]; then
-        SELECTED_SKILLS+=("${SKILLS[$i]}")
-    fi
-done
-
-if [ ${#SELECTED_SKILLS[@]} -eq 0 ]; then
-    echo "❌ No skills selected"
-    exit 0
-fi
-
-echo "🚀 Installing ${#SELECTED_SKILLS[@]} skill(s) to ${#SELECTED_AGENTS[@]} agent(s)..."
-echo ""
-
-INSTALLED=0
-FAILED=0
-
-AGENT_FLAGS=""
-for agent in "${SELECTED_AGENTS[@]}"; do
-    AGENT_FLAGS="$AGENT_FLAGS -a $agent"
-done
-
-for skill in "${SELECTED_SKILLS[@]}"; do
-    echo "Installing $skill..."
-    
-    if [[ $skill =~ ^([^/]+)/([^/]+)/(.+)$ ]]; then
-        owner="${BASH_REMATCH[1]}"
-        repo="${BASH_REMATCH[2]}"
-        skill_name="${BASH_REMATCH[3]}"
-        cmd="npx skills add ${owner}/${repo} --skill ${skill_name}${AGENT_FLAGS} -y"
-    else
-        cmd="npx skills add ${skill}${AGENT_FLAGS} -y"
-    fi
-    
-    if eval "$cmd"; then
-        echo "✅ Successfully installed $skill"
-        INSTALLED=$((INSTALLED + 1))
-    else
-        echo "⚠️  Failed to install $skill"
-        FAILED=$((FAILED + 1))
-    fi
-    echo ""
-done
-
-echo "✨ Installation complete!"
-echo "   Installed: $INSTALLED"
-if [ $FAILED -gt 0 ]; then
-    echo "   Failed: $FAILED"
-fi
+main "$@"

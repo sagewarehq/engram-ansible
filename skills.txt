@@ -1,4 +1,4 @@
-vercel-labs/skills/agent-browser
+vercel-labs/agent-browser
 anthropics/skills/frontend-design
 anthropics/skills/pptx
 anthropics/skills/docx

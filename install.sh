@@ -9,7 +9,6 @@ if ! command -v npx &> /dev/null; then
     exit 1
 fi
 
-# Available agents
 AGENTS=(
     "antigravity" "augment" "claude-code" "openclaw" "codebuddy" "command-code"
     "continue" "cortex" "crush" "cursor" "droid" "gemini-cli" "github-copilot"
@@ -29,8 +28,28 @@ AGENT_ALL_SELECTED=0
 WINDOW_SIZE=15
 WINDOW_START=0
 
+get_key() {
+    local key
+    IFS= read -rsn1 key
+    
+    if [[ $key == $'\x1b' ]]; then
+        read -rsn1 k1
+        read -rsn1 k2
+        case "$k1$k2" in
+            '[A') echo "UP" ;;
+            '[B') echo "DOWN" ;;
+            *) echo "ESC" ;;
+        esac
+    elif [[ $key == "" ]] || [[ $key == $'\n' ]]; then
+        echo "ENTER"
+    elif [[ $key == " " ]]; then
+        echo "SPACE"
+    elif [[ $key == "q" ]] || [[ $key == "Q" ]]; then
+        echo "QUIT"
+    fi
+}
+
 draw_agent_menu() {
-    # Update window to keep cursor visible (only for agent items, not "All agents")
     if [ $AGENT_CURRENT -ge 0 ]; then
         if [ $AGENT_CURRENT -lt $WINDOW_START ]; then
             WINDOW_START=$AGENT_CURRENT
@@ -38,11 +57,12 @@ draw_agent_menu() {
             WINDOW_START=$((AGENT_CURRENT - WINDOW_SIZE + 1))
         fi
     else
-        # Reset window when on "All agents"
         WINDOW_START=0
     fi
     
-    clear
+    tput clear
+    tput cup 0 0
+    
     echo "███████╗██╗  ██╗██╗██╗     ██╗     ███████╗"
     echo "██╔════╝██║ ██╔╝██║██║     ██║     ██╔════╝"
     echo "███████╗█████╔╝ ██║██║     ██║     ███████╗"
@@ -138,42 +158,39 @@ stty -echo -icanon time 0 min 0
 draw_agent_menu
 
 while true; do
-    IFS= read -r -n1 key
+    key=$(get_key)
     
-    if [[ $key == $'\x1b' ]]; then
-        read -r -t 0.1 -n1 key2
-        read -r -t 0.1 -n1 key3
-        arrow="${key2}${key3}"
-        
-        case $arrow in
-            '[A')
-                if [ $AGENT_CURRENT -gt -1 ]; then
-                    AGENT_CURRENT=$((AGENT_CURRENT - 1))
-                fi
-                draw_agent_menu
-                ;;
-            '[B')
-                if [ $AGENT_CURRENT -lt $((${#AGENTS[@]} - 1)) ]; then
-                    AGENT_CURRENT=$((AGENT_CURRENT + 1))
-                fi
-                draw_agent_menu
-                ;;
-        esac
-    elif [[ $key == " " ]]; then
-        toggle_agent_selection
-        draw_agent_menu
-    elif [[ $key == "" ]] || [[ $key == $'\n' ]]; then
-        break
-    elif [[ $key == "q" ]] || [[ $key == "Q" ]]; then
-        stty echo icanon
-        clear
-        echo "❌ Installation cancelled"
-        exit 0
-    fi
+    case "$key" in
+        UP)
+            if [ $AGENT_CURRENT -gt -1 ]; then
+                AGENT_CURRENT=$((AGENT_CURRENT - 1))
+            fi
+            draw_agent_menu
+            ;;
+        DOWN)
+            if [ $AGENT_CURRENT -lt $((${#AGENTS[@]} - 1)) ]; then
+                AGENT_CURRENT=$((AGENT_CURRENT + 1))
+            fi
+            draw_agent_menu
+            ;;
+        SPACE)
+            toggle_agent_selection
+            draw_agent_menu
+            ;;
+        ENTER)
+            break
+            ;;
+        QUIT)
+            stty echo icanon
+            tput clear
+            echo "❌ Installation cancelled"
+            exit 0
+            ;;
+    esac
 done
 
 stty echo icanon
-clear
+tput clear
 
 SELECTED_AGENTS=()
 for i in "${!AGENTS[@]}"; do
@@ -211,7 +228,9 @@ CURRENT=-1
 ALL_SELECTED=0
 
 draw_menu() {
-    clear
+    tput clear
+    tput cup 0 0
+    
     echo "███████╗██╗  ██╗██╗██╗     ██╗     ███████╗"
     echo "██╔════╝██║ ██╔╝██║██║     ██║     ██╔════╝"
     echo "███████╗█████╔╝ ██║██║     ██║     ███████╗"
@@ -294,42 +313,39 @@ stty -echo -icanon time 0 min 0
 draw_menu
 
 while true; do
-    IFS= read -r -n1 key
+    key=$(get_key)
     
-    if [[ $key == $'\x1b' ]]; then
-        read -r -t 0.1 -n1 key2
-        read -r -t 0.1 -n1 key3
-        arrow="${key2}${key3}"
-        
-        case $arrow in
-            '[A')
-                if [ $CURRENT -gt -1 ]; then
-                    CURRENT=$((CURRENT - 1))
-                fi
-                draw_menu
-                ;;
-            '[B')
-                if [ $CURRENT -lt $((${#SKILLS[@]} - 1)) ]; then
-                    CURRENT=$((CURRENT + 1))
-                fi
-                draw_menu
-                ;;
-        esac
-    elif [[ $key == " " ]]; then
-        toggle_selection
-        draw_menu
-    elif [[ $key == "" ]] || [[ $key == $'\n' ]]; then
-        break
-    elif [[ $key == "q" ]] || [[ $key == "Q" ]]; then
-        stty echo icanon
-        clear
-        echo "❌ Installation cancelled"
-        exit 0
-    fi
+    case "$key" in
+        UP)
+            if [ $CURRENT -gt -1 ]; then
+                CURRENT=$((CURRENT - 1))
+            fi
+            draw_menu
+            ;;
+        DOWN)
+            if [ $CURRENT -lt $((${#SKILLS[@]} - 1)) ]; then
+                CURRENT=$((CURRENT + 1))
+            fi
+            draw_menu
+            ;;
+        SPACE)
+            toggle_selection
+            draw_menu
+            ;;
+        ENTER)
+            break
+            ;;
+        QUIT)
+            stty echo icanon
+            tput clear
+            echo "❌ Installation cancelled"
+            exit 0
+            ;;
+    esac
 done
 
 stty echo icanon
-clear
+tput clear
 
 SELECTED_SKILLS=()
 for i in "${!SKILLS[@]}"; do
